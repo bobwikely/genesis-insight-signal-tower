@@ -22,6 +22,7 @@ from functools import lru_cache # For caching function results
 from tenacity import retry, stop_after_attempt, wait_exponential # For API retries
 from dataclasses import dataclass
 from pydantic import BaseModel, Field, validator, ValidationError, root_validator # For enhanced data validation
+from concurrent.futures import ThreadPoolExecutor # For parallel file processing
 
 # ================== 配置管理 ==================
 @dataclass
@@ -413,14 +414,25 @@ class CandidateReportModel(BaseModel):
     applicant_name: str = Field(..., min_length=1, max_length=100)
     analysis_date: str
     
-    # Fields that might be at the root level in older JSONs or direct from AI
-    overall_match_score: Optional[float] = None
-    recommended_positions: Optional[List[str]] = Field(default_factory=list)
-    analysis_summary: Optional[str] = None # Added as it's in the user's JSON
+    # analysis_summary is still at the root in the user's JSON
+    analysis_summary: Optional[str] = None 
 
-    # The nested models, now potentially constructed by root_validator
-    intended_role_analysis: Optional[IntendedRoleAnalysis] = None
-    human_ai_collaboration_fit: Optional[HumanAICollaborationFit] = None # Make optional, will be handled by root_validator
+    # The nested models, now always present due to default_factory
+    intended_role_analysis: IntendedRoleAnalysis = Field(
+        default_factory=lambda: IntendedRoleAnalysis(
+            role_name="未知岗位",
+            overall_match_score=0.0,
+            score_reason="数据缺失",
+            preliminary_skills_match={"overall_assessment": "未知", "details": []},
+            full_state_potential_analysis={"overall_assessment": "未知", "details": []}
+        )
+    )
+    human_ai_collaboration_fit: HumanAICollaborationFit = Field(
+        default_factory=lambda: HumanAICollaborationFit(
+            assessment="未知",
+            reason="数据缺失"
+        )
+    )
 
     strengths: List[str] = Field(default_factory=list)
     weaknesses_or_risks: List[str] = Field(default_factory=list)
@@ -439,19 +451,21 @@ class CandidateReportModel(BaseModel):
         if 'human_ai_collaboration_fit' in values and isinstance(values['human_ai_collaboration_fit'], (int, float)):
             values['human_ai_collaboration_fit'] = {
                 "assessment": values['human_ai_collaboration_fit'],
-                "reason": "根据匹配度推断" # Default reason
+                "reason": "根据匹配度推断"
             }
         
-        # Handle intended_role_analysis being missing but data present at root
-        if 'intended_role_analysis' not in values:
-            root_score = values.get('overall_match_score')
-            recommended_pos = values.get('recommended_positions')
-
+        # If intended_role_analysis is missing in the *raw input*, try to construct it from root-level fields
+        # This check should be against the *raw* values, not the already-processed ones.
+        # The default_factory handles cases where it's still missing after this.
+        if 'intended_role_analysis' not in values or values.get('intended_role_analysis') is None:
+            root_score = values.get('overall_match_score') # Get from raw input
+            recommended_pos = values.get('recommended_positions') # Get from raw input
+            
             if root_score is not None:
                 values['intended_role_analysis'] = {
                     "role_name": recommended_pos[0] if recommended_pos else "未知岗位",
                     "overall_match_score": root_score,
-                    "score_reason": values.get('analysis_summary', '根据AI报告推断'), # Use analysis_summary if available
+                    "score_reason": values.get('analysis_summary', '根据AI报告推断'),
                     "preliminary_skills_match": {
                         "overall_assessment": "未知",
                         "details": []
@@ -460,15 +474,6 @@ class CandidateReportModel(BaseModel):
                         "overall_assessment": "未知",
                         "details": []
                     }
-                }
-            else:
-                # If no root score and no intended_role_analysis, provide a minimal default
-                values['intended_role_analysis'] = {
-                    "role_name": "未知岗位",
-                    "overall_match_score": 0.0,
-                    "score_reason": "数据缺失",
-                    "preliminary_skills_match": {"overall_assessment": "未知", "details": []},
-                    "full_state_potential_analysis": {"overall_assessment": "未知", "details": []}
                 }
         return values
 
@@ -498,7 +503,6 @@ def infer_recommendation_level(match_score: float) -> str:
         return "暂不推荐"
 
 # --- Performance Optimization: Cached File Processing ---
-from concurrent.futures import ThreadPoolExecutor # Moved import to top, but keeping here for context
 @st.cache_data(ttl=config.SESSION_TIMEOUT)  # Cache results for 1 hour, using config
 def process_and_validate_json_content(file_contents_bytes: List[bytes], filenames: List[str]) -> List[Dict[str, Any]]:
     """
