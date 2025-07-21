@@ -14,9 +14,8 @@ st.title("🚦 Signal Tower | Genesis Insight 候选人排序系统")
 st.markdown("上传多个结构化 JSON 报告，系统将自动提取候选人信息并进行排序分析。")
 
 # FastAPI 后端 API 的基础 URL
-# 在本地开发时，指向本地运行的FastAPI后端
-# TODO: 部署到生产环境时，请将其替换为您的后端API的实际生产URL！
-FASTAPI_BACKEND_URL = "https://genesis-insight-fastapi-backend.onrender.com" # <--- 替换为您的实际URL
+# IMPORTANT: 部署到生产环境时，请将其替换为您的后端API的实际生产URL！
+FASTAPI_BACKEND_URL = "https://genesis-insight-fastapi-backend.onrender.com" # <--- 这里已更新为您的Render.com URL
 
 # 定义推荐等级的排序顺序，用于后续自定义排序
 RECOMMENDATION_ORDER = ["强力推荐", "推荐", "考虑", "暂不推荐"]
@@ -116,7 +115,7 @@ with tab1:
     # --- 健壮性检查：如果DataFrame为空，则停止后续操作 ---
     if df.empty:
         st.warning("没有成功加载的有效候选人数据。请上传 JSON 文件以开始分析。")
-    else:
+    else: # <--- 这个 else 语句的缩进是正确的
         # --- 筛选与排序设置 (侧边栏) ---
         st.sidebar.header("🎛️ 排序与筛选选项")
         
@@ -339,4 +338,3 @@ with tab2:
     
     if not st.session_state.raw_json_reports_for_sorting or len(st.session_state.raw_json_reports_for_sorting) < 2:
         st.info("请上传至少两份候选人 JSON 分析报告以进行 AI 智能排序。")
-
