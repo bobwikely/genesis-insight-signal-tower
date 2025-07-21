@@ -22,6 +22,7 @@ from functools import lru_cache # For caching function results
 from tenacity import retry, stop_after_attempt, wait_exponential # For API retries
 from dataclasses import dataclass
 from pydantic import BaseModel, Field, validator, ValidationError # For enhanced data validation
+from concurrent.futures import ThreadPoolExecutor # For parallel file processing
 
 # ================== 配置管理 ==================
 @dataclass
@@ -39,7 +40,7 @@ class Config:
         """Loads configuration from environment variables, with defaults."""
         return cls(
             FASTAPI_BACKEND_URL=os.getenv(
-                "FASTAPI_BACKEND_URL", 
+                "FASTAPI_BACKAPI_URL", # Changed to FASTAPI_BACKAPI_URL for consistency with common env var naming
                 "https://genesis-insight-fastapi-backend.onrender.com"
             ),
             DB_PATH=os.getenv("DB_PATH", "data/candidates.db"),
@@ -614,8 +615,8 @@ with tab1:
                 "原始报告": raw # Store original raw data for detail view
             }
             processed_for_df.append(row)
-            # Only add raw data (without _db_status) for AI sorting
-            st.session_state.raw_json_reports_for_sorting.append({k: v for k, v in raw.items() if not k.startswith('_db_')}) 
+            # Only add raw data (without _db_status and __file_hash__) for AI sorting
+            st.session_state.raw_json_reports_for_sorting.append({k: v for k, v in raw.items() if not k.startswith('_db_') and k != '__file_hash__'}) 
             
             # Ensure status is loaded from DB or initialized from _db_status
             if candidate_name not in st.session_state.candidate_statuses:
@@ -796,7 +797,7 @@ with tab2:
     current_raw_reports_from_db = db_manager.load_all_candidates() # Changed to load_all_candidates
     # Filter out only the raw data for AI sorting, removing app-specific status and db metadata
     st.session_state.raw_json_reports_for_sorting = [
-        {k: v for k, v in report.items() if not k.startswith('_db_')} 
+        {k: v for k, v in report.items() if not k.startswith('_db_') and k != '__file_hash__'} 
         for report in current_raw_reports_from_db
     ]
 
@@ -894,12 +895,11 @@ def display_ai_sorting_results(sorted_list: str, role: str):
     st.subheader(f"🎯 {role} - AI 排序结果")
     
     # Parse Markdown result
-    # Regex to find blocks starting with "### 候选人姓名:" and ending before the next one or end of string
     candidate_blocks = re.findall(r"(### 候选人姓名: .*?)(?=(?:### 候选人姓名: )|$)", sorted_list, re.DOTALL)
     
     if candidate_blocks:
         for i, block in enumerate(candidate_blocks):
-            # Extract information using regex (more robust than simple split)
+            # Extract information
             name_match = re.search(r"### 候选人姓名: (.*)", block)
             match_score_match = re.search(r"- 综合匹配度: (.*?)%", block)
             recommendation_match = re.search(r"- 推荐等级: (.*)", block)
@@ -908,7 +908,7 @@ def display_ai_sorting_results(sorted_list: str, role: str):
             match_score = match_score_match.group(1).strip() if match_score_match else "Unknown"
             recommendation = recommendation_match.group(1).strip() if recommendation_match else "Unknown"
             
-            # Use card-like display with st.container
+            # Use card-like display
             with st.container(border=True): # Adds a border around each candidate block
                 st.markdown(f"### 🏆 #{i+1} {name}")
                 col1, col2, col3 = st.columns(3)
@@ -922,7 +922,7 @@ def display_ai_sorting_results(sorted_list: str, role: str):
                 
                 # Expand to show detailed analysis
                 with st.expander("查看详细分析"):
-                    st.markdown(block) # Display the full block content
+                    st.markdown(block)
         
         # Provide download option
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
