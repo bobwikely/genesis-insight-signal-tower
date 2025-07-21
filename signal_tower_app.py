@@ -2,6 +2,7 @@ import streamlit as st
 import json
 import pandas as pd
 import requests # 用于调用 FastAPI 后端
+from datetime import datetime # 用于生成唯一文件名
 
 # 配置页面，设置标题和布局为宽屏
 st.set_page_config(page_title="Signal Tower - 候选人排序系统", layout="wide")
@@ -26,11 +27,13 @@ ROLES = [
     "数据专家/助理", "AI产品运营官", "AI交互与支持专家", "AI时代数字设计师"
 ]
 
-# Streamlit Session State 用于存储筛选状态，以便在页面刷新时保持
+# Streamlit Session State 用于存储筛选状态和上传的JSON数据，以便在页面刷新时保持
 if 'candidate_statuses' not in st.session_state:
     st.session_state.candidate_statuses = {}
 if 'uploaded_json_data' not in st.session_state:
-    st.session_state.uploaded_json_data = []
+    st.session_state.uploaded_json_data = [] # 存储用于列表和筛选的扁平化数据
+if 'raw_json_reports_for_sorting' not in st.session_state:
+    st.session_state.raw_json_reports_for_sorting = [] # 存储原始JSON报告用于AI排序
 
 # 创建标签页
 tab1, tab2 = st.tabs(["📋 候选人列表与筛选", "🧠 AI 智能排序引擎"])
@@ -47,9 +50,16 @@ with tab1:
 
     if uploaded_files:
         current_upload_data = []
+        current_raw_json_for_sorting = []
         for file in uploaded_files:
             try:
                 raw = json.load(file) # 解析 JSON 文件内容
+                
+                # 检查必要的键是否存在，防止 KeyError
+                if not all(k in raw for k in ["intended_role_analysis", "human_ai_collaboration_fit", "overall_recommendation"]):
+                    st.error(f"文件 {file.name} 缺少核心分析数据（如岗位分析、人机契合度、推荐等级）。请检查 JSON 结构。")
+                    continue # 跳过此文件
+
                 candidate_name = raw.get("applicant_name", "未知")
                 
                 # 从 JSON 中提取关键信息，构建成一行数据
@@ -65,6 +75,7 @@ with tab1:
                     "面试建议": raw.get("next_steps_suggestion", "")
                 }
                 current_upload_data.append(row) # 将处理后的数据添加到列表中
+                current_raw_json_for_sorting.append(raw) # 将原始JSON添加到用于排序的列表中
 
                 # 初始化或更新候选人的筛选状态
                 if candidate_name not in st.session_state.candidate_statuses:
@@ -72,15 +83,24 @@ with tab1:
                 
             except json.JSONDecodeError:
                 st.error(f"文件 {file.name} 不是有效的 JSON 格式。请确保文件内容是纯粹的 JSON。")
-            except KeyError as ke:
-                st.error(f"文件 {file.name} 缺少必要的键值：{ke}。请检查 JSON 结构是否完整。")
             except Exception as e:
                 st.error(f"文件 {file.name} 加载失败: {e}")
         
-        # 将当前上传的数据添加到 session_state 中，以便在不同标签页间共享
+        # 将当前上传的数据添加到 session_state 中，并去重
+        # 注意：这里需要更复杂的去重逻辑，例如基于姓名+岗位，目前简单去重
         st.session_state.uploaded_json_data.extend(current_upload_data)
-        # 移除重复项，以防用户多次上传相同文件
-        st.session_state.uploaded_json_data = [dict(t) for t in {tuple(d.items()) for d in st.session_state.uploaded_json_data}]
+        st.session_state.raw_json_reports_for_sorting.extend(current_raw_json_for_sorting)
+        
+        # 简单的基于姓名去重（如果姓名相同，认为重复）
+        unique_data = {d['姓名']: d for d in st.session_state.uploaded_json_data}.values()
+        st.session_state.uploaded_json_data = list(unique_data)
+
+        unique_raw_reports = {}
+        for report in st.session_state.raw_json_reports_for_sorting:
+            name = report.get("applicant_name", "未知")
+            unique_raw_reports[name] = report
+        st.session_state.raw_json_reports_for_sorting = list(unique_raw_reports.values())
+
 
     # 将所有数据转换为 Pandas DataFrame，便于处理和显示
     df = pd.DataFrame(st.session_state.uploaded_json_data)
@@ -184,34 +204,38 @@ with tab1:
                 key="download_markdown_tab1"
             )
         
-    else:
-        st.info("请上传至少一份结构化 JSON 报告以开始分析。")
+    # else: # <--- 移除这个 else，因为它导致了语法错误
+    #     st.info("请上传至少一份结构化 JSON 报告以开始分析。") # <--- 这行现在由 tab2 外部的 df.empty 检查处理
 
 with tab2:
     st.header("AI 智能排序引擎")
     st.markdown("上传多份候选人深度分析报告（JSON格式），AI 将为您生成综合排序列表。")
 
     # 在这个标签页再次提供文件上传，但这次是用于排序
-    sorting_uploaded_files = st.file_uploader(
+    # 注意：这里我们使用 raw_json_reports_for_sorting，它包含了所有上传的原始JSON数据
+    # 这样可以避免重复上传，并确保两个标签页的数据一致性
+    current_sorting_uploaded_files = st.file_uploader(
         "📤 上传候选人 JSON 分析报告（可多选）", 
         type="json", 
         accept_multiple_files=True,
         key="sorting_uploader" # 确保key唯一
     )
 
-    candidate_reports_for_sorting = []
-    if sorting_uploaded_files:
-        for file in sorting_uploaded_files:
+    if current_sorting_uploaded_files:
+        # 清空 session_state.raw_json_reports_for_sorting，只保留当前上传的
+        # 否则每次上传都会累加
+        st.session_state.raw_json_reports_for_sorting = [] 
+        for file in current_sorting_uploaded_files:
             try:
                 report_data = json.load(file)
-                candidate_reports_for_sorting.append(report_data)
+                st.session_state.raw_json_reports_for_sorting.append(report_data)
             except json.JSONDecodeError:
                 st.error(f"文件 {file.name} 不是有效的 JSON 格式。请确保文件内容是纯粹的 JSON。")
             except Exception as e:
                 st.error(f"文件 {file.name} 加载失败: {e}")
         
-        if not candidate_reports_for_sorting:
-            st.warning("没有成功加载的有效报告用于排序。")
+    if not st.session_state.raw_json_reports_for_sorting: # <--- 修正：检查 session_state 中的数据
+        st.warning("没有成功加载的有效报告用于排序。请上传 JSON 文件。")
             
     # 岗位选择，用于 AI 排序的上下文
     selected_sorting_role = st.selectbox(
@@ -220,13 +244,15 @@ with tab2:
         key="sorting_role_select"
     )
 
-    if st.button("🚀 运行 AI 智能排序", disabled=not candidate_reports_for_sorting, key="run_ai_sorting_button"):
+    if st.button("🚀 运行 AI 智能排序", 
+                 disabled=not st.session_state.raw_json_reports_for_sorting, # <--- 修正：检查 session_state 中的数据
+                 key="run_ai_sorting_button"):
         with st.spinner("AI 正在分析并排序候选人，请稍候..."):
             try:
                 response = requests.post(
                     f"{FASTAPI_BACKEND_URL}/sort-candidates/",
                     json={
-                        "candidate_reports": candidate_reports_for_sorting,
+                        "candidate_reports": st.session_state.raw_json_reports_for_sorting, # <--- 修正：使用 session_state 中的原始数据
                         "role": selected_sorting_role
                     }
                 )
@@ -255,6 +281,6 @@ with tab2:
             except Exception as e:
                 st.error(f"AI 智能排序过程中发生错误: {e}")
     
-    if not sorting_uploaded_files:
-        st.info("请上传至少一份候选人 JSON 分析报告以进行 AI 智能排序。")
+    # if not sorting_uploaded_files: # <--- 移除这个，因为上面已经检查了 session_state
+    #     st.info("请上传至少一份候选人 JSON 分析报告以进行 AI 智能排序。")
 
