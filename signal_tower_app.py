@@ -108,14 +108,13 @@ with tab1:
         st.session_state.uploaded_json_data = list(unique_processed_data)
         st.session_state.raw_json_reports_for_sorting = list(unique_raw_reports)
 
-
     # 将所有数据转换为 Pandas DataFrame，便于处理和显示
     df = pd.DataFrame(st.session_state.uploaded_json_data)
 
     # --- 健壮性检查：如果DataFrame为空，则停止后续操作 ---
     if df.empty:
         st.warning("没有成功加载的有效候选人数据。请上传 JSON 文件以开始分析。")
-    else: # <--- 这个 else 语句的缩进是正确的
+    else:
         # --- 筛选与排序设置 (侧边栏) ---
         st.sidebar.header("🎛️ 排序与筛选选项")
         
@@ -213,9 +212,6 @@ with tab1:
                 mime="text/markdown",
                 key="download_markdown_tab1"
             )
-        
-    else:
-        st.info("请上传至少一份结构化 JSON 报告以开始分析。")
 
 with tab2:
     st.header("AI 智能排序引擎")
