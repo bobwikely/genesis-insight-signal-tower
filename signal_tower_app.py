@@ -16,7 +16,7 @@ st.markdown("上传多个结构化 JSON 报告，系统将自动提取候选人�
 # FastAPI 后端 API 的基础 URL
 # 在本地开发时，指向本地运行的FastAPI后端
 # TODO: 部署到生产环境时，请将其替换为您的后端API的实际生产URL！
-FASTAPI_BACKEND_URL = "http://localhost:8000"
+FASTAPI_BACKEND_URL = "https://genesis-insight-fastapi-backend.onrender.com" # <--- 替换为您的实际URL
 
 # 定义推荐等级的排序顺序，用于后续自定义排序
 RECOMMENDATION_ORDER = ["强力推荐", "推荐", "考虑", "暂不推荐"]
