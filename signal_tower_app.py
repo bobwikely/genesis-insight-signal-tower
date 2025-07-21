@@ -21,8 +21,7 @@ from contextlib import contextmanager # For database connection context
 from functools import lru_cache # For caching function results
 from tenacity import retry, stop_after_attempt, wait_exponential # For API retries
 from dataclasses import dataclass
-from pydantic import BaseModel, Field, validator, ValidationError # For enhanced data validation
-from concurrent.futures import ThreadPoolExecutor # For parallel file processing
+from pydantic import BaseModel, Field, validator, ValidationError, root_validator # For enhanced data validation
 
 # ================== 配置管理 ==================
 @dataclass
@@ -391,11 +390,13 @@ class IntendedRoleAnalysis(BaseModel):
 
 class HumanAICollaborationFit(BaseModel):
     assessment: Union[str, float] # Can be "高", "中", "低" or a number
-    reason: str
+    reason: str = "根据匹配度推断" # Provide a default reason if not given
 
-    @validator('assessment')
-    def validate_fit_score(cls, v):
-        """Validates human_ai_collaboration_fit assessment."""
+    @validator('assessment', pre=True, always=True)
+    def convert_assessment(cls, v):
+        """Validates and converts human_ai_collaboration_fit assessment."""
+        if isinstance(v, (int, float)):
+            return v
         if isinstance(v, str) and v.lower() in ['未知', 'unknown', '高', '中', '低']:
             return v
         try:
@@ -403,16 +404,24 @@ class HumanAICollaborationFit(BaseModel):
             if 0 <= score <= 100:
                 return score
             else:
-                raise ValueError("Score must be between 0 and 100")
+                raise ValueError("Score must be between 0 and 100 or a valid string.")
         except (ValueError, TypeError):
             logger.warning(f"Invalid human_ai_collaboration_fit assessment value: {v}. Defaulting to '未知'.")
-            return "未知" # Fallback if conversion fails or out of range
+            return "未知"
 
 class CandidateReportModel(BaseModel):
     applicant_name: str = Field(..., min_length=1, max_length=100)
     analysis_date: str
-    intended_role_analysis: IntendedRoleAnalysis
-    human_ai_collaboration_fit: HumanAICollaborationFit
+    
+    # Fields that might be at the root level in older JSONs or direct from AI
+    overall_match_score: Optional[float] = None
+    recommended_positions: Optional[List[str]] = Field(default_factory=list)
+    analysis_summary: Optional[str] = None # Added as it's in the user's JSON
+
+    # The nested models, now potentially constructed by root_validator
+    intended_role_analysis: Optional[IntendedRoleAnalysis] = None
+    human_ai_collaboration_fit: Optional[HumanAICollaborationFit] = None # Make optional, will be handled by root_validator
+
     strengths: List[str] = Field(default_factory=list)
     weaknesses_or_risks: List[str] = Field(default_factory=list)
     interview_questions: List[str] = Field(default_factory=list)
@@ -424,6 +433,45 @@ class CandidateReportModel(BaseModel):
         """Sanitizes applicant name (e.g., removes leading/trailing whitespace)."""
         return v.strip()
 
+    @root_validator(pre=True)
+    def preprocess_input(cls, values):
+        # Handle human_ai_collaboration_fit being a direct number
+        if 'human_ai_collaboration_fit' in values and isinstance(values['human_ai_collaboration_fit'], (int, float)):
+            values['human_ai_collaboration_fit'] = {
+                "assessment": values['human_ai_collaboration_fit'],
+                "reason": "根据匹配度推断" # Default reason
+            }
+        
+        # Handle intended_role_analysis being missing but data present at root
+        if 'intended_role_analysis' not in values:
+            root_score = values.get('overall_match_score')
+            recommended_pos = values.get('recommended_positions')
+
+            if root_score is not None:
+                values['intended_role_analysis'] = {
+                    "role_name": recommended_pos[0] if recommended_pos else "未知岗位",
+                    "overall_match_score": root_score,
+                    "score_reason": values.get('analysis_summary', '根据AI报告推断'), # Use analysis_summary if available
+                    "preliminary_skills_match": {
+                        "overall_assessment": "未知",
+                        "details": []
+                    },
+                    "full_state_potential_analysis": {
+                        "overall_assessment": "未知",
+                        "details": []
+                    }
+                }
+            else:
+                # If no root score and no intended_role_analysis, provide a minimal default
+                values['intended_role_analysis'] = {
+                    "role_name": "未知岗位",
+                    "overall_match_score": 0.0,
+                    "score_reason": "数据缺失",
+                    "preliminary_skills_match": {"overall_assessment": "未知", "details": []},
+                    "full_state_potential_analysis": {"overall_assessment": "未知", "details": []}
+                }
+        return values
+
 # --- Constants and Helper Functions ---
 RECOMMENDATION_ORDER = ["强力推荐", "推荐", "考虑", "暂不推荐"]
 FILTER_STATUS_OPTIONS = ["所有状态", "第一轮通过", "待面试", "不推荐"]
@@ -433,7 +481,7 @@ ROLES = [
     "项目管理专家", "AI产品经理", "AI解决方案架构师",
     "AI伦理与合规专家", "商业拓展/销售总监", "AI培训师/技术传道师",
     "AI研究科学家/前沿探索者", "MLOps工程师", "数据治理与架构专家",
-    "用户体验（UX）UX研究员", "市场与增长专家", "社区运营经理",
+    "用户体验（UX）研究员", "市场与增长专家", "社区运营经理",
     "法律与伦理专家"
 ]
 
@@ -450,6 +498,7 @@ def infer_recommendation_level(match_score: float) -> str:
         return "暂不推荐"
 
 # --- Performance Optimization: Cached File Processing ---
+from concurrent.futures import ThreadPoolExecutor # Moved import to top, but keeping here for context
 @st.cache_data(ttl=config.SESSION_TIMEOUT)  # Cache results for 1 hour, using config
 def process_and_validate_json_content(file_contents_bytes: List[bytes], filenames: List[str]) -> List[Dict[str, Any]]:
     """
@@ -496,9 +545,10 @@ def _safe_json_load_sync(content_bytes: bytes, filename: str) -> Tuple[Dict[str,
 
         # 4. Load JSON and validate with Pydantic
         data = json.loads(content_str)
-        CandidateReportModel(**data) # This will raise ValidationError if invalid
+        # Use CandidateReportModel to validate and transform the data
+        validated_data = CandidateReportModel(**data) 
         
-        return data, "Success", file_hash
+        return validated_data.dict(), "Success", file_hash # Return the validated/transformed dict
         
     except json.JSONDecodeError as e:
         return None, f"JSON format error: {str(e)}", file_hash
@@ -554,15 +604,15 @@ with tab1:
             if processed_raw_data:
                 # Save each valid candidate to the database
                 newly_processed_count = 0
-                for raw_data in processed_raw_data:
-                    applicant_name = raw_data.get("applicant_name", "未知")
-                    file_hash = raw_data.pop('__file_hash__', None) # Get and remove hash before saving raw_data
+                for raw_data_from_pydantic in processed_raw_data: # raw_data_from_pydantic is already a validated dict
+                    applicant_name = raw_data_from_pydantic.get("applicant_name", "未知")
+                    file_hash = raw_data_from_pydantic.pop('__file_hash__', None) # Get and remove hash before saving raw_data
                     if not file_hash:
                         st.error(f"无法为文件 {applicant_name} 生成哈希值，跳过保存。")
                         continue
                     try:
                         # Pass file_hash to save_candidate
-                        db_manager.save_candidate(applicant_name, raw_data, file_hash) 
+                        db_manager.save_candidate(applicant_name, raw_data_from_pydantic, file_hash) 
                         if applicant_name not in st.session_state.candidate_statuses:
                             st.session_state.candidate_statuses[applicant_name] = "所有状态"
                         newly_processed_count += 1
@@ -592,20 +642,20 @@ with tab1:
             validated_report = CandidateReportModel(**raw)
             candidate_name = validated_report.applicant_name
             
-            # Extract main role safely
-            main_role = validated_report.intended_role_analysis.role_name
+            # Extract main role safely from the validated report
+            main_role = validated_report.intended_role_analysis.role_name if validated_report.intended_role_analysis else "未知岗位"
             
             # Extract human_ai_fit_value and prepare for display
-            human_ai_fit_value = validated_report.human_ai_collaboration_fit.assessment
+            human_ai_fit_value = validated_report.human_ai_collaboration_fit.assessment if validated_report.human_ai_collaboration_fit else "未知"
             
             # Get recommendation level (prioritize 'overall_recommendation' if exists, else infer)
             recommendation_level = validated_report.overall_recommendation or \
-                                   infer_recommendation_level(validated_report.intended_role_analysis.overall_match_score)
+                                   infer_recommendation_level(validated_report.intended_role_analysis.overall_match_score if validated_report.intended_role_analysis else 0)
 
             row = {
                 "姓名": candidate_name,
                 "岗位": main_role, 
-                "匹配度": validated_report.intended_role_analysis.overall_match_score,
+                "匹配度": validated_report.intended_role_analysis.overall_match_score if validated_report.intended_role_analysis else 0,
                 "人机契合度": human_ai_fit_value,
                 "推荐等级": recommendation_level, 
                 "风险数": len(validated_report.weaknesses_or_risks),
@@ -615,8 +665,8 @@ with tab1:
                 "原始报告": raw # Store original raw data for detail view
             }
             processed_for_df.append(row)
-            # Only add raw data (without _db_status and __file_hash__) for AI sorting
-            st.session_state.raw_json_reports_for_sorting.append({k: v for k, v in raw.items() if not k.startswith('_db_') and k != '__file_hash__'}) 
+            # Only add validated data for AI sorting, removing _db_status and __file_hash__
+            st.session_state.raw_json_reports_for_sorting.append(validated_report.dict()) # Use .dict() for Pydantic v1
             
             # Ensure status is loaded from DB or initialized from _db_status
             if candidate_name not in st.session_state.candidate_statuses:
@@ -797,7 +847,8 @@ with tab2:
     current_raw_reports_from_db = db_manager.load_all_candidates() # Changed to load_all_candidates
     # Filter out only the raw data for AI sorting, removing app-specific status and db metadata
     st.session_state.raw_json_reports_for_sorting = [
-        {k: v for k, v in report.items() if not k.startswith('_db_') and k != '__file_hash__'} 
+        # Use CandidateReportModel to ensure consistency for backend
+        CandidateReportModel(**report).dict() 
         for report in current_raw_reports_from_db
     ]
 
@@ -822,14 +873,14 @@ with tab2:
             
             if processed_raw_data_for_sorting:
                 newly_processed_count = 0
-                for raw_data in processed_raw_data_for_sorting:
-                    applicant_name = raw_data.get("applicant_name", "未知")
-                    file_hash = raw_data.pop('__file_hash__', None)
+                for raw_data_from_pydantic in processed_raw_data_for_sorting: # This is already a validated dict
+                    applicant_name = raw_data_from_pydantic.get("applicant_name", "未知")
+                    file_hash = raw_data_from_pydantic.pop('__file_hash__', None)
                     if not file_hash:
                         st.error(f"无法为文件 {applicant_name} 生成哈希值，跳过保存。")
                         continue
                     try:
-                        db_manager.save_candidate(applicant_name, raw_data, file_hash)
+                        db_manager.save_candidate(applicant_name, raw_data_from_pydantic, file_hash)
                         if applicant_name not in st.session_state.candidate_statuses:
                             st.session_state.candidate_statuses[applicant_name] = "所有状态"
                         newly_processed_count += 1
